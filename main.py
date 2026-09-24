@@ -1,88 +1,121 @@
-import numpy as np
-from scipy.stats import poisson
-from fastapi import FastAPI, Query
+import math
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
 
-app = FastAPI(title="GrowX API")
+app = FastAPI(title="GrowX API", version="1.0")
 
+# ==========================================
+# CONFIGURATION CORS (Résout l'erreur Failed to fetch)
+# ==========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],  # Autorise toutes les origines (Render frontend, local, etc.)
+    allow_credentials=True,
+    allow_methods=["*"],  # Autorise toutes les méthodes (POST, GET, OPTIONS, etc.)
+    allow_headers=["*"],  # Autorise tous les en-têtes
 )
 
-def dixon_coles_tau(x: int, y: int, lambda_x: float, mu_y: float, rho: float) -> float:
-    if x == 0 and y == 0:
-        return 1.0 - (lambda_x * mu_y * rho)
-    elif x == 0 and y == 1:
-        return 1.0 + (lambda_x * rho)
-    elif x == 1 and y == 0:
-        return 1.0 + (mu_y * rho)
-    elif x == 1 and y == 1:
+# ==========================================
+# MODÈLES DE DONNÉES EN ENTRÉE
+# ==========================================
+class MatchInput(BaseModel):
+    home_xg: Optional[float] = None
+    away_xg: Optional[float] = None
+    home_team_xg: Optional[float] = None
+    away_team_xg: Optional[float] = None
+
+# ==========================================
+# FONCTIONS MATHEMATIQUES (Poisson & Dixon-Coles)
+# ==========================================
+def poisson_pmf(k: int, mu: float) -> float:
+    """Calcule la probabilité de Poisson pour k buts avec une moyenne mu."""
+    if mu <= 0:
+        return 1.0 if k == 0 else 0.0
+    return (math.pow(mu, k) * math.exp(-mu)) / math.factorial(k)
+
+def dixon_coles_adjustment(i: int, j: int, home_xg: float, away_xg: float, rho: float = -0.04) -> float:
+    """Ajustement de Dixon-Coles pour les faibles scores (0-0, 1-0, 0-1, 1-1)."""
+    if i == 0 and j == 0:
+        return 1.0 - (home_xg * away_xg * rho)
+    elif i == 0 and j == 1:
+        return 1.0 + (home_xg * rho)
+    elif i == 1 and j == 0:
+        return 1.0 + (away_xg * rho)
+    elif i == 1 and j == 1:
         return 1.0 - rho
     return 1.0
 
-class ScoreDetail(BaseModel):
-    score: str
-    probabilite_pct: float
-    cote_equitable: float
+# ==========================================
+# ENDPOINTS API
+# ==========================================
+@app.get("/")
+def read_root():
+    return {"message": "API GrowX opérationnelle et prête."}
 
-class PredictionResponse(BaseModel):
-    xg_home: float
-    xg_away: float
-    top_3_scores: List[ScoreDetail]
-    matrix: List[List[float]]
-    gombo_couverture: str
-    gombo_securite: str
+@app.post("/predict")
+def predict_match(data: MatchInput):
+    # Gestion des noms de clés flexibles (home_xg ou home_team_xg)
+    h_xg = data.home_xg if data.home_xg is not None else data.home_team_xg
+    a_xg = data.away_xg if data.away_xg is not None else data.away_team_xg
 
-@app.get("/predict", response_model=PredictionResponse)
-def predict_score(
-    xg_home: float = Query(1.85, gt=0),
-    xg_away: float = Query(1.20, gt=0),
-    rho: float = Query(-0.13)
-):
-    matrice = np.zeros((6, 6))
-    prob_btts = 0.0
-    
-    for h in range(6):
-        for a in range(6):
-            p_h = poisson.pmf(h, xg_home)
-            p_a = poisson.pmf(a, xg_away)
-            tau = dixon_coles_tau(h, a, xg_home, xg_away, rho)
-            val = max(0.0, p_h * p_a * tau)
-            matrice[h, a] = val
-            if h > 0 and a > 0:
-                prob_btts += val
+    if h_xg is None or a_xg is None:
+        raise HTTPException(
+            status_code=422, 
+            detail="Les valeurs xG à domicile et à l'extérieur sont requises."
+        )
 
-    matrice /= np.sum(matrice)
-    
-    scores_flat = []
-    for h in range(6):
-        for a in range(6):
-            prob = float(matrice[h, a])
-            fair_odds = round(1.0 / prob, 2) if prob > 0 else 0.0
-            scores_flat.append(
-                ScoreDetail(
-                    score=f"{h} - {a}",
-                    probabilite_pct=round(prob * 100, 2),
-                    cote_equitable=fair_odds
-                )
-            )
+    # 1. Calcul de la matrice 6x6 (buts de 0 à 5)
+    matrix = []
+    scores_list = []
+    total_prob = 0.0
+
+    for i in range(6):  # Buts Équipe Domicile (0 à 5)
+        row = []
+        for j in range(6):  # Buts Équipe Extérieur (0 à 5)
+            # Calcul Poisson de base
+            p_i = poisson_pmf(i, h_xg)
+            p_j = poisson_pmf(j, a_xg)
+            prob = p_i * p_j
             
-    scores_tries = sorted(scores_flat, key=lambda x: x.probabilite_pct, reverse=True)[:3]
-    top3_str = " OU ".join([s.score for s in scores_tries])
-    
-    pari_securite = "Les 2 équipes marquent (BTTS : OUI)" if prob_btts > 0.50 else "Moins de 3.5 Buts dans le match"
+            # Ajustement Dixon-Coles
+            adj = dixon_coles_adjustment(i, j, h_xg, a_xg)
+            prob *= adj
+            
+            row.append(prob)
+            scores_list.append({
+                "score": f"{i}-{j}",
+                "home": i,
+                "away": j,
+                "probability": prob
+            })
+            total_prob += prob
+        matrix.append(row)
 
-    return PredictionResponse(
-        xg_home=xg_home,
-        xg_away=xg_away,
-        top_3_scores=scores_tries,
-        matrix=np.round(matrice * 100, 2).tolist(),
-        gombo_couverture=f"Score Exact Multi : {top3_str}",
-        gombo_securite=pari_securite
-    )
+    # Normalisation des probabilités sur la matrice 6x6
+    if total_prob > 0:
+        for i in range(6):
+            for j in range(6):
+                matrix[i][j] /= total_prob
+        for item in scores_list:
+            item["probability"] /= total_prob
 
+    # 2. Tri des scores pour obtenir le Top 3
+    scores_sorted = sorted(scores_list, key=lambda x: x["probability"], reverse=True)
+    top_scores = scores_sorted[:3]
+
+    # 3. Calcul du Pari Gombo Spécial (Cumul des 4 scores les plus probables)
+    gombo_items = scores_sorted[:4]
+    gombo_selection = [item["score"] for item in gombo_items]
+    gombo_probability = sum(item["probability"] for item in gombo_items)
+
+    return {
+        "status": "success",
+        "home_xg": h_xg,
+        "away_xg": a_xg,
+        "top_scores": top_scores,
+        "gombo_selection": gombo_selection,
+        "gombo_probability": gombo_probability,
+        "matrix": matrix
+    }
