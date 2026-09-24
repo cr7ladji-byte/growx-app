@@ -68,7 +68,7 @@
             color: var(--text-light);
         }
 
-        input[type="number"] {
+        input[type="text"], input[type="number"] {
             width: 100%;
             padding: 12px;
             border-radius: 8px;
@@ -181,11 +181,11 @@
         <div class="input-group">
             <div>
                 <label for="home_xg">xG Équipe Domicile :</label>
-                <input type="number" id="home_xg" step="0.01" placeholder="Ex: 1.55" value="1.50">
+                <input type="text" id="home_xg" inputmode="decimal" placeholder="Ex: 1.50" value="1.50">
             </div>
             <div>
                 <label for="away_xg">xG Équipe Extérieur :</label>
-                <input type="number" id="away_xg" step="0.01" placeholder="Ex: 1.10" value="1.10">
+                <input type="text" id="away_xg" inputmode="decimal" placeholder="Ex: 1.10" value="1.10">
             </div>
         </div>
         <button onclick="calculatePredictions()">Générer l'Analyse</button>
@@ -193,19 +193,16 @@
     </div>
 
     <div id="results" class="results">
-        <!-- Top 3 Scores Exacts -->
         <div class="card">
             <h3>Top 3 Scores Exacts les plus Probables</h3>
             <div id="top3" class="top-scores"></div>
         </div>
 
-        <!-- Pari Gombo Spécial -->
         <div class="card gombo-box">
             <h3>Pari Gombo Spécial</h3>
             <div id="gombo-content"></div>
         </div>
 
-        <!-- Matrice 6x6 -->
         <div class="card">
             <h3>Matrice de Probabilités (6x6)</h3>
             <div class="table-container">
@@ -222,8 +219,12 @@
 
 <script>
     async function calculatePredictions() {
-        const homeXg = parseFloat(document.getElementById('home_xg').value);
-        const awayXg = parseFloat(document.getElementById('away_xg').value);
+        const homeInput = document.getElementById('home_xg').value.replace(',', '.');
+        const awayInput = document.getElementById('away_xg').value.replace(',', '.');
+        
+        const homeXg = parseFloat(homeInput);
+        const awayXg = parseFloat(awayInput);
+        
         const loadingDiv = document.getElementById('loading');
         const resultsDiv = document.getElementById('results');
 
@@ -235,68 +236,85 @@
         loadingDiv.style.display = 'block';
         resultsDiv.style.display = 'none';
 
+        // Tente les formats de payload possibles pour correspondre au backend
+        const payload = { 
+            home_xg: homeXg, 
+            away_xg: awayXg,
+            home_team_xg: homeXg,
+            away_team_xg: awayXg
+        };
+
         try {
             const response = await fetch('https://growx-app.onrender.com/predict', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ home_xg: homeXg, away_xg: awayXg })
+                body: JSON.stringify(payload)
             });
 
             if (!response.ok) {
-                throw new Error("Erreur de réponse du serveur.");
+                const errorText = await response.text();
+                throw new Error(`Statut ${response.status}: ${errorText}`);
             }
 
             const data = await response.json();
             displayResults(data);
 
         } catch (error) {
-            alert("Erreur lors de la connexion au serveur backend : " + error.message);
+            alert("Erreur serveur : " + error.message);
         } finally {
             loadingDiv.style.display = 'none';
         }
     }
 
     function displayResults(data) {
-        // 1. Affichage du Top 3
+        // 1. Top 3
         const top3Div = document.getElementById('top3');
         top3Div.innerHTML = '';
-        if (data.top_scores) {
-            data.top_scores.slice(0, 3).forEach(item => {
+        const scores = data.top_scores || data.top_3_scores || data.scores || [];
+        
+        if (Array.isArray(scores)) {
+            scores.slice(0, 3).forEach(item => {
+                const scoreText = item.score || `${item.home}-${item.away}`;
+                const probVal = item.probability || item.prob || item.p || 0;
                 top3Div.innerHTML += `
                     <div class="score-box">
-                        <div class="score">${item.score}</div>
-                        <div class="prob">${(item.probability * 100).toFixed(1)}%</div>
+                        <div class="score">${scoreText}</div>
+                        <div class="prob">${(probVal * (probVal <= 1 ? 100 : 1)).toFixed(1)}%</div>
                     </div>
                 `;
             });
         }
 
-        // 2. Affichage Pari Gombo
+        // 2. Pari Gombo
         const gomboDiv = document.getElementById('gombo-content');
-        if (data.gombo_selection) {
+        const gomboSel = data.gombo_selection || data.gombo_scores || data.gombo || [];
+        const gomboProb = data.gombo_probability || data.gombo_prob || 0;
+        
+        if (gomboSel.length > 0) {
             gomboDiv.innerHTML = `
-                <p><strong>Sélection Optimisée :</strong> ${data.gombo_selection.join(', ')}</p>
-                <p><strong>Probabilité Cumulée :</strong> ${(data.gombo_probability * 100).toFixed(1)}%</p>
+                <p><strong>Sélection Optimisée :</strong> ${Array.isArray(gomboSel) ? gomboSel.join(', ') : gomboSel}</p>
+                <p><strong>Probabilité Cumulée :</strong> ${(gomboProb * (gomboProb <= 1 ? 100 : 1)).toFixed(1)}%</p>
             `;
         } else {
-            gomboDiv.innerHTML = `<p>Données indisponibles.</p>`;
+            gomboDiv.innerHTML = `<p>Données non disponibles dans la réponse.</p>`;
         }
 
-        // 3. Affichage Matrice 6x6
+        // 3. Matrice 6x6
         const headerRow = document.getElementById('matrix-header');
         const tbody = document.getElementById('matrix-body');
         headerRow.innerHTML = '<th>Dom / Ext</th>';
         tbody.innerHTML = '';
 
-        if (data.matrix) {
-            for (let j = 0; j <= 5; j++) {
+        const matrix = data.matrix || data.probability_matrix || data.probabilities;
+        if (matrix && Array.isArray(matrix)) {
+            for (let j = 0; j < matrix[0].length; j++) {
                 headerRow.innerHTML += `<th>${j}</th>`;
             }
 
-            for (let i = 0; i <= 5; i++) {
+            for (let i = 0; i < matrix.length; i++) {
                 let rowHtml = `<tr><th>${i}</th>`;
-                for (let j = 0; j <= 5; j++) {
-                    const prob = (data.matrix[i][j] * 100).toFixed(1);
+                for (let j = 0; j < matrix[i].length; j++) {
+                    const prob = (matrix[i][j] * (matrix[i][j] <= 1 ? 100 : 1)).toFixed(1);
                     rowHtml += `<td>${prob}%</td>`;
                 }
                 rowHtml += '</tr>';
