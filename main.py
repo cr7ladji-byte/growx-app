@@ -30,7 +30,7 @@ class MatchInput(BaseModel):
 # FONCTIONS MATHEMATIQUES (Poisson & Dixon-Coles)
 # ==========================================
 def poisson_pmf(k: int, mu: float) -> float:
-    """Calcule la probabilité de Poisson pour k buts avec une moyenne mu."""
+    """Calcule la probabilité de Poisson pour k événements avec une moyenne mu."""
     if mu <= 0:
         return 1.0 if k == 0 else 0.0
     return (math.pow(mu, k) * math.exp(-mu)) / math.factorial(k)
@@ -74,12 +74,10 @@ def predict_match(data: MatchInput):
     for i in range(6):  # Buts Équipe Domicile (0 à 5)
         row = []
         for j in range(6):  # Buts Équipe Extérieur (0 à 5)
-            # Calcul Poisson de base
             p_i = poisson_pmf(i, h_xg)
             p_j = poisson_pmf(j, a_xg)
             prob = p_i * p_j
             
-            # Ajustement Dixon-Coles
             adj = dixon_coles_adjustment(i, j, h_xg, a_xg)
             prob *= adj
             
@@ -110,6 +108,23 @@ def predict_match(data: MatchInput):
     gombo_selection = [item["score"] for item in gombo_items]
     gombo_probability = sum(item["probability"] for item in gombo_items)
 
+    # ==========================================
+    # 4. STATISTIQUES SECONDAIRES (Cartons & Fautes séparés)
+    # ==========================================
+    total_xg = h_xg + a_xg
+
+    # --- Cartons (Ligne standard : 3.5) ---
+    expected_cards = 3.6 + (total_xg * 0.15)
+    # Probabilité Over 3.5 cartons
+    p_cards_under = sum(poisson_pmf(k, expected_cards) for k in range(4)) # 0, 1, 2, 3 cartons
+    cards_over_prob = max(10.0, min(90.0, (1.0 - p_cards_under) * 100))
+
+    # --- Fautes (Ligne standard : 23.5) ---
+    expected_fouls = 22.0 + (total_xg * 1.2)
+    # Probabilité Over 23.5 fautes (approximation via Poisson décalé)
+    p_fouls_under = sum(poisson_pmf(k, expected_fouls) for k in range(24)) # 0 à 23 fautes
+    fouls_over_prob = max(10.0, min(90.0, (1.0 - p_fouls_under) * 100))
+
     return {
         "status": "success",
         "home_xg": h_xg,
@@ -117,5 +132,17 @@ def predict_match(data: MatchInput):
         "top_scores": top_scores,
         "gombo_selection": gombo_selection,
         "gombo_probability": gombo_probability,
-        "matrix": matrix
+        "matrix": matrix,
+        "stats": {
+            "cards": {
+                "line": 3.5,
+                "over_probability": round(cards_over_prob, 1),
+                "under_probability": round(100 - cards_over_prob, 1)
+            },
+            "fouls": {
+                "line": 23.5,
+                "over_probability": round(fouls_over_prob, 1),
+                "under_probability": round(100 - fouls_over_prob, 1)
+            }
+        }
     }
